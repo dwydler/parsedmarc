@@ -1,5 +1,23 @@
 # Changelog
 
+## 9.4.0
+
+### Added
+
+- Extracted `load_reverse_dns_map()` utility function in `utils.py` for loading the reverse DNS map independently of individual IP lookups.
+- SIGHUP reload now re-downloads/reloads the reverse DNS map, so changes take effect without restarting.
+- Add premade OpenSearch index patterns, visualizations, and dashboards
+
+### Changed
+
+- When `index_prefix_domain_map` is configured, SMTP TLS reports for domains not in the map are now silently dropped instead of being output. Unlike DMARC, TLS-RPT has no DNS authorization records, so this filtering prevents processing reports for unrelated domains.
+- Bump OpenSearch support to `< 4`
+
+### Fixed
+
+- Fixed `get_index_prefix` using wrong key (`domain` instead of `policy_domain`) for SMTP TLS reports, which prevented domain map matching from working for TLS reports.
+- Domain matching in `get_index_prefix` now lowercases the domain for case-insensitive comparison.
+
 ## 9.3.1
 
 ### Breaking changes

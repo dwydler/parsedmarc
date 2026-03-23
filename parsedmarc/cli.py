@@ -19,6 +19,7 @@ import yaml
 from tqdm import tqdm
 
 from parsedmarc import (
+    REVERSE_DNS_MAP,
     SEEN_AGGREGATE_REPORT_IDS,
     InvalidDMARCReport,
     ParserError,
@@ -48,7 +49,12 @@ from parsedmarc.mail import (
 )
 from parsedmarc.mail.graph import AuthMethod
 from parsedmarc.types import ParsingResults
-from parsedmarc.utils import get_base_domain, get_reverse_dns, is_mbox
+from parsedmarc.utils import (
+    get_base_domain,
+    get_reverse_dns,
+    is_mbox,
+    load_reverse_dns_map,
+)
 
 # Increase the max header limit for very large emails. `_MAXHEADERS` is a
 # private stdlib attribute and may not exist in type stubs.
@@ -1068,20 +1074,22 @@ def _main():
         elif "reported_domain" in report:
             domain = report["reported_domain"]
         elif "policies" in report:
-            domain = report["policies"][0]["domain"]
+            domain = report["policies"][0]["policy_domain"]
         if domain:
             domain = get_base_domain(domain)
-            for prefix in index_prefix_domain_map:
-                if domain in index_prefix_domain_map[prefix]:
-                    prefix = (
-                        prefix.lower()
-                        .strip()
-                        .strip("_")
-                        .replace(" ", "_")
-                        .replace("-", "_")
-                    )
-                    prefix = f"{prefix}_"
-                    return prefix
+            if domain:
+                domain = domain.lower()
+                for prefix in index_prefix_domain_map:
+                    if domain in index_prefix_domain_map[prefix]:
+                        prefix = (
+                            prefix.lower()
+                            .strip()
+                            .strip("_")
+                            .replace(" ", "_")
+                            .replace("-", "_")
+                        )
+                        prefix = f"{prefix}_"
+                        return prefix
         return None
 
     def process_reports(reports_):
@@ -1091,6 +1099,22 @@ def _main():
             message = f"{destination} Error: {error}"
             logger.error(message)
             output_errors.append(message)
+
+        if index_prefix_domain_map is not None:
+            filtered_tls = []
+            for report in reports_.get("smtp_tls_reports", []):
+                if get_index_prefix(report) is not None:
+                    filtered_tls.append(report)
+                else:
+                    domain = "unknown"
+                    if "policies" in report and report["policies"]:
+                        domain = report["policies"][0].get("policy_domain", "unknown")
+                    logger.debug(
+                        "Ignoring SMTP TLS report for domain not in "
+                        "index_prefix_domain_map: %s",
+                        domain,
+                    )
+            reports_["smtp_tls_reports"] = filtered_tls
 
         indent_value = 2 if opts.prettify_json else None
         output_str = "{0}\n".format(
@@ -2087,6 +2111,17 @@ def _main():
                 _close_output_clients(clients)
                 clients = new_clients
                 index_prefix_domain_map = new_index_prefix_domain_map
+
+                # Reload the reverse DNS map so changes to the
+                # map path/URL in the config take effect.
+                load_reverse_dns_map(
+                    REVERSE_DNS_MAP,
+                    always_use_local_file=new_opts.always_use_local_files,
+                    local_file_path=new_opts.reverse_dns_map_path,
+                    url=new_opts.reverse_dns_map_url,
+                    offline=new_opts.offline,
+                )
+
                 for k, v in vars(new_opts).items():
                     setattr(opts, k, v)
 

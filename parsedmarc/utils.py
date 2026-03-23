@@ -335,6 +335,76 @@ def get_ip_address_country(
     return country
 
 
+def load_reverse_dns_map(
+    reverse_dns_map: ReverseDNSMap,
+    *,
+    always_use_local_file: bool = False,
+    local_file_path: Optional[str] = None,
+    url: Optional[str] = None,
+    offline: bool = False,
+) -> None:
+    """
+    Loads the reverse DNS map from a URL or local file.
+
+    Clears and repopulates the given map dict in place. If the map is
+    fetched from a URL, that is tried first; on failure (or if offline/local
+    mode is selected) the bundled CSV is used as a fallback.
+
+    Args:
+        reverse_dns_map (dict): The map dict to populate (modified in place)
+        always_use_local_file (bool): Always use a local map file
+        local_file_path (str): Path to a local map file
+        url (str): URL to a reverse DNS map
+        offline (bool): Use the built-in copy of the reverse DNS map
+    """
+    if url is None:
+        url = (
+            "https://raw.githubusercontent.com/domainaware"
+            "/parsedmarc/master/parsedmarc/"
+            "resources/maps/base_reverse_dns_map.csv"
+        )
+
+    reverse_dns_map.clear()
+
+    def load_csv(_csv_file):
+        reader = csv.DictReader(_csv_file)
+        for row in reader:
+            key = row["base_reverse_dns"].lower().strip()
+            reverse_dns_map[key] = {
+                "name": row["name"].strip(),
+                "type": row["type"].strip(),
+            }
+
+    csv_file = io.StringIO()
+
+    if not (offline or always_use_local_file):
+        try:
+            logger.debug(f"Trying to fetch reverse DNS map from {url}...")
+            headers = {"User-Agent": USER_AGENT}
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            csv_file.write(response.text)
+            csv_file.seek(0)
+            load_csv(csv_file)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Failed to fetch reverse DNS map: {e}")
+        except Exception:
+            logger.warning("Not a valid CSV file")
+            csv_file.seek(0)
+            logging.debug("Response body:")
+            logger.debug(csv_file.read())
+
+    if len(reverse_dns_map) == 0:
+        logger.info("Loading included reverse DNS map...")
+        path = str(
+            files(parsedmarc.resources.maps).joinpath("base_reverse_dns_map.csv")
+        )
+        if local_file_path is not None:
+            path = local_file_path
+        with open(path) as csv_file:
+            load_csv(csv_file)
+
+
 def get_service_from_reverse_dns_base_domain(
     base_domain,
     *,
@@ -361,55 +431,21 @@ def get_service_from_reverse_dns_base_domain(
     """
 
     base_domain = base_domain.lower().strip()
-    if url is None:
-        url = (
-            "https://raw.githubusercontent.com/domainaware"
-            "/parsedmarc/master/parsedmarc/"
-            "resources/maps/base_reverse_dns_map.csv"
-        )
     reverse_dns_map_value: ReverseDNSMap
     if reverse_dns_map is None:
         reverse_dns_map_value = {}
     else:
         reverse_dns_map_value = reverse_dns_map
 
-    def load_csv(_csv_file):
-        reader = csv.DictReader(_csv_file)
-        for row in reader:
-            key = row["base_reverse_dns"].lower().strip()
-            reverse_dns_map_value[key] = {
-                "name": row["name"],
-                "type": row["type"],
-            }
-
-    csv_file = io.StringIO()
-
-    if not (offline or always_use_local_file) and len(reverse_dns_map_value) == 0:
-        try:
-            logger.debug(f"Trying to fetch reverse DNS map from {url}...")
-            headers = {"User-Agent": USER_AGENT}
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            csv_file.write(response.text)
-            csv_file.seek(0)
-            load_csv(csv_file)
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to fetch reverse DNS map: {e}")
-        except Exception:
-            logger.warning("Not a valid CSV file")
-            csv_file.seek(0)
-            logging.debug("Response body:")
-            logger.debug(csv_file.read())
-
     if len(reverse_dns_map_value) == 0:
-        logger.info("Loading included reverse DNS map...")
-        path = str(
-            files(parsedmarc.resources.maps).joinpath("base_reverse_dns_map.csv")
+        load_reverse_dns_map(
+            reverse_dns_map_value,
+            always_use_local_file=always_use_local_file,
+            local_file_path=local_file_path,
+            url=url,
+            offline=offline,
         )
-        if local_file_path is not None:
-            path = local_file_path
-        with open(path) as csv_file:
-            load_csv(csv_file)
+
     service: ReverseDNSService
     try:
         service = reverse_dns_map_value[base_domain]

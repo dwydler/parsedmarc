@@ -4,6 +4,7 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 import io
+import json
 import os
 import signal
 import sys
@@ -2277,6 +2278,200 @@ watch = true
         self.assertIsNotNone(init_opts_captures[0].kafka_hosts)
         # Second init (after reload with v2 config): kafka_hosts should be None
         self.assertIsNone(init_opts_captures[1].kafka_hosts)
+
+    @unittest.skipUnless(
+        hasattr(signal, "SIGHUP"),
+        "SIGHUP not available on this platform",
+    )
+    @patch("parsedmarc.cli._init_output_clients")
+    @patch("parsedmarc.cli._parse_config_file")
+    @patch("parsedmarc.cli.get_dmarc_reports_from_mailbox")
+    @patch("parsedmarc.cli.watch_inbox")
+    @patch("parsedmarc.cli.IMAPConnection")
+    def testReloadRefreshesReverseDnsMap(
+        self,
+        mock_imap,
+        mock_watch,
+        mock_get_reports,
+        mock_parse_config,
+        mock_init_clients,
+    ):
+        """SIGHUP reload repopulates the reverse DNS map so lookups still work."""
+        import signal as signal_module
+
+        from parsedmarc import REVERSE_DNS_MAP
+
+        mock_imap.return_value = object()
+        mock_get_reports.return_value = {
+            "aggregate_reports": [],
+            "forensic_reports": [],
+            "smtp_tls_reports": [],
+        }
+
+        def parse_side_effect(config_file, opts):
+            opts.imap_host = "imap.example.com"
+            opts.imap_user = "user"
+            opts.imap_password = "pass"
+            opts.mailbox_watch = True
+            return None
+
+        mock_parse_config.side_effect = parse_side_effect
+        mock_init_clients.return_value = {}
+
+        # Snapshot the map state after each watch_inbox call
+        map_snapshots = []
+
+        watch_calls = [0]
+
+        def watch_side_effect(*args, **kwargs):
+            watch_calls[0] += 1
+            if watch_calls[0] == 1:
+                if hasattr(signal_module, "SIGHUP"):
+                    import os
+
+                    os.kill(os.getpid(), signal_module.SIGHUP)
+                return
+            else:
+                # Capture the map state after reload, before we stop the loop
+                map_snapshots.append(dict(REVERSE_DNS_MAP))
+                raise FileExistsError("stop")
+
+        mock_watch.side_effect = watch_side_effect
+
+        with tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False) as cfg:
+            cfg.write(self._BASE_CONFIG)
+            cfg_path = cfg.name
+        self.addCleanup(lambda: os.path.exists(cfg_path) and os.remove(cfg_path))
+
+        # Pre-populate the map so we can verify it gets refreshed
+        REVERSE_DNS_MAP.clear()
+        REVERSE_DNS_MAP["stale.example.com"] = {
+            "name": "Stale",
+            "type": "stale",
+        }
+        original_contents = dict(REVERSE_DNS_MAP)
+
+        with patch.object(sys, "argv", ["parsedmarc", "-c", cfg_path]):
+            with self.assertRaises(SystemExit):
+                parsedmarc.cli._main()
+
+        self.assertEqual(mock_watch.call_count, 2)
+        # The map should have been repopulated (not empty, not the stale data)
+        self.assertEqual(len(map_snapshots), 1)
+        refreshed = map_snapshots[0]
+        self.assertGreater(len(refreshed), 0, "Map should not be empty after reload")
+        self.assertNotEqual(
+            refreshed,
+            original_contents,
+            "Map should have been refreshed, not kept stale data",
+        )
+        self.assertNotIn(
+            "stale.example.com",
+            refreshed,
+            "Stale entry should have been cleared by reload",
+        )
+
+
+class TestIndexPrefixDomainMapTlsFiltering(unittest.TestCase):
+    """Tests that SMTP TLS reports for unmapped domains are filtered out
+    when index_prefix_domain_map is configured."""
+
+    @patch("parsedmarc.cli.get_dmarc_reports_from_mailbox")
+    @patch("parsedmarc.cli.IMAPConnection")
+    def testTlsReportsFilteredByDomainMap(
+        self,
+        mock_imap_connection,
+        mock_get_reports,
+    ):
+        """TLS reports for domains not in the map should be silently dropped."""
+        mock_imap_connection.return_value = object()
+        mock_get_reports.return_value = {
+            "aggregate_reports": [],
+            "forensic_reports": [],
+            "smtp_tls_reports": [
+                {
+                    "organization_name": "Allowed Org",
+                    "begin_date": "2024-01-01T00:00:00Z",
+                    "end_date": "2024-01-01T23:59:59Z",
+                    "report_id": "allowed-1",
+                    "contact_info": "tls@allowed.example.com",
+                    "policies": [
+                        {
+                            "policy_domain": "allowed.example.com",
+                            "policy_type": "sts",
+                            "successful_session_count": 1,
+                            "failed_session_count": 0,
+                        }
+                    ],
+                },
+                {
+                    "organization_name": "Unmapped Org",
+                    "begin_date": "2024-01-01T00:00:00Z",
+                    "end_date": "2024-01-01T23:59:59Z",
+                    "report_id": "unmapped-1",
+                    "contact_info": "tls@unmapped.example.net",
+                    "policies": [
+                        {
+                            "policy_domain": "unmapped.example.net",
+                            "policy_type": "sts",
+                            "successful_session_count": 5,
+                            "failed_session_count": 0,
+                        }
+                    ],
+                },
+                {
+                    "organization_name": "Mixed Case Org",
+                    "begin_date": "2024-01-01T00:00:00Z",
+                    "end_date": "2024-01-01T23:59:59Z",
+                    "report_id": "mixed-case-1",
+                    "contact_info": "tls@mixedcase.example.com",
+                    "policies": [
+                        {
+                            "policy_domain": "MixedCase.Example.Com",
+                            "policy_type": "sts",
+                            "successful_session_count": 2,
+                            "failed_session_count": 0,
+                        }
+                    ],
+                },
+            ],
+        }
+
+        domain_map = {"tenant_a": ["example.com"]}
+        with NamedTemporaryFile("w", suffix=".yaml", delete=False) as map_file:
+            import yaml
+
+            yaml.dump(domain_map, map_file)
+            map_path = map_file.name
+        self.addCleanup(lambda: os.path.exists(map_path) and os.remove(map_path))
+
+        config = f"""[general]
+save_smtp_tls = true
+silent = false
+index_prefix_domain_map = {map_path}
+
+[imap]
+host = imap.example.com
+user = test-user
+password = test-password
+"""
+        with NamedTemporaryFile("w", suffix=".ini", delete=False) as config_file:
+            config_file.write(config)
+            config_path = config_file.name
+        self.addCleanup(lambda: os.path.exists(config_path) and os.remove(config_path))
+
+        captured = io.StringIO()
+        with patch.object(sys, "argv", ["parsedmarc", "-c", config_path]):
+            with patch("sys.stdout", captured):
+                parsedmarc.cli._main()
+
+        output = json.loads(captured.getvalue())
+        tls_reports = output["smtp_tls_reports"]
+        self.assertEqual(len(tls_reports), 2)
+        report_ids = {r["report_id"] for r in tls_reports}
+        self.assertIn("allowed-1", report_ids)
+        self.assertIn("mixed-case-1", report_ids)
+        self.assertNotIn("unmapped-1", report_ids)
 
 
 if __name__ == "__main__":
