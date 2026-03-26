@@ -264,7 +264,7 @@ def _load_config(config_file: str | None = None) -> ConfigParser:
     Raises:
         ConfigurationError: If *config_file* is given but does not exist.
     """
-    config = ConfigParser()
+    config = ConfigParser(interpolation=None)
     if config_file is not None:
         abs_path = os.path.abspath(config_file)
         if not os.path.exists(abs_path):

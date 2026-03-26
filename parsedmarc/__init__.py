@@ -1955,9 +1955,7 @@ def get_dmarc_reports_from_mailbox(
             )
             current_time = datetime.now(timezone.utc).strftime("%d-%b-%Y")
         elif isinstance(connection, MSGraphConnection):
-            since = (
-                datetime.now(timezone.utc) - timedelta(minutes=_since)
-            ).isoformat()
+            since = (datetime.now(timezone.utc) - timedelta(minutes=_since)).isoformat()
             current_time = datetime.now(timezone.utc).isoformat() + "Z"
         elif isinstance(connection, GmailConnection):
             since = (datetime.now(timezone.utc) - timedelta(minutes=_since)).strftime(

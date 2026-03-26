@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.5.2
+
+### Fixed
+
+- Fixed `ValueError: invalid interpolation syntax` when config values (from env vars or INI files) contain `%` characters, such as in passwords. Disabled ConfigParser's `%`-based string interpolation.
+
 ## 9.5.1
 
 ### Changes
