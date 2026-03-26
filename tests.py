@@ -2566,6 +2566,164 @@ class TestMaildirConnection(unittest.TestCase):
             self.assertEqual(len(conn._subfolder_client["archive"].keys()), 1)
 
 
+class TestMaildirReportsFolder(unittest.TestCase):
+    """Tests for Maildir reports_folder support in fetch_messages."""
+
+    def test_fetch_from_subfolder(self):
+        """fetch_messages with a subfolder name reads from that subfolder."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            # Add message to a subfolder
+            subfolder = conn._client.add_folder("reports")
+            msg_key = subfolder.add("From: test@example.com\n\nSubfolder msg")
+
+            # Root should be empty
+            self.assertEqual(conn.fetch_messages("INBOX"), [])
+
+            # Subfolder should have the message
+            keys = conn.fetch_messages("reports")
+            self.assertIn(msg_key, keys)
+
+    def test_fetch_message_uses_active_folder(self):
+        """fetch_message reads from the folder set by fetch_messages."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            subfolder = conn._client.add_folder("reports")
+            msg_key = subfolder.add("From: sub@example.com\n\nIn subfolder")
+
+            conn.fetch_messages("reports")
+            content = conn.fetch_message(msg_key)
+            self.assertIn("sub@example.com", content)
+
+    def test_delete_message_uses_active_folder(self):
+        """delete_message removes from the folder set by fetch_messages."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            subfolder = conn._client.add_folder("reports")
+            msg_key = subfolder.add("From: del@example.com\n\nDelete me")
+
+            conn.fetch_messages("reports")
+            conn.delete_message(msg_key)
+            self.assertEqual(conn.fetch_messages("reports"), [])
+
+    def test_move_message_from_subfolder(self):
+        """move_message works when active folder is a subfolder."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            subfolder = conn._client.add_folder("reports")
+            msg_key = subfolder.add("From: move@example.com\n\nMove me")
+
+            conn.fetch_messages("reports")
+            conn.move_message(msg_key, "archive")
+
+            # Source should be empty
+            self.assertEqual(conn.fetch_messages("reports"), [])
+            # Destination should have the message
+            archive_keys = conn.fetch_messages("archive")
+            self.assertEqual(len(archive_keys), 1)
+
+    def test_inbox_reads_root(self):
+        """INBOX reads from the top-level Maildir."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            msg_key = conn._client.add("From: root@example.com\n\nRoot msg")
+
+            keys = conn.fetch_messages("INBOX")
+            self.assertIn(msg_key, keys)
+
+    def test_empty_folder_reads_root(self):
+        """Empty string reports_folder reads from the top-level Maildir."""
+        from parsedmarc.mail.maildir import MaildirConnection
+
+        with TemporaryDirectory() as d:
+            conn = MaildirConnection(d, maildir_create=True)
+
+            msg_key = conn._client.add("From: root@example.com\n\nRoot msg")
+
+            keys = conn.fetch_messages("")
+            self.assertIn(msg_key, keys)
+
+
+class TestConfigAliases(unittest.TestCase):
+    """Tests for config key aliases (env var friendly short names)."""
+
+    def test_maildir_create_alias(self):
+        """[maildir] create works as alias for maildir_create."""
+        from argparse import Namespace
+        from parsedmarc.cli import _load_config, _parse_config
+
+        env = {
+            "PARSEDMARC_MAILDIR_CREATE": "true",
+            "PARSEDMARC_MAILDIR_PATH": "/tmp/test",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            config = _load_config(None)
+        opts = Namespace()
+        _parse_config(config, opts)
+        self.assertTrue(opts.maildir_create)
+
+    def test_maildir_path_alias(self):
+        """[maildir] path works as alias for maildir_path."""
+        from argparse import Namespace
+        from parsedmarc.cli import _load_config, _parse_config
+
+        env = {"PARSEDMARC_MAILDIR_PATH": "/var/mail/dmarc"}
+        with patch.dict(os.environ, env, clear=False):
+            config = _load_config(None)
+        opts = Namespace()
+        _parse_config(config, opts)
+        self.assertEqual(opts.maildir_path, "/var/mail/dmarc")
+
+    def test_msgraph_url_alias(self):
+        """[msgraph] url works as alias for graph_url."""
+        from parsedmarc.cli import _load_config, _parse_config
+        from argparse import Namespace
+
+        env = {
+            "PARSEDMARC_MSGRAPH_AUTH_METHOD": "ClientSecret",
+            "PARSEDMARC_MSGRAPH_CLIENT_ID": "test-id",
+            "PARSEDMARC_MSGRAPH_CLIENT_SECRET": "test-secret",
+            "PARSEDMARC_MSGRAPH_TENANT_ID": "test-tenant",
+            "PARSEDMARC_MSGRAPH_MAILBOX": "test@example.com",
+            "PARSEDMARC_MSGRAPH_URL": "https://custom.graph.example.com",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            config = _load_config(None)
+        opts = Namespace()
+        _parse_config(config, opts)
+        self.assertEqual(opts.graph_url, "https://custom.graph.example.com")
+
+    def test_original_keys_still_work(self):
+        """Original INI key names (maildir_create, maildir_path) still work."""
+        from argparse import Namespace
+        from parsedmarc.cli import _parse_config
+
+        config = ConfigParser(interpolation=None)
+        config.add_section("maildir")
+        config.set("maildir", "maildir_path", "/original/path")
+        config.set("maildir", "maildir_create", "true")
+
+        opts = Namespace()
+        _parse_config(config, opts)
+        self.assertEqual(opts.maildir_path, "/original/path")
+        self.assertTrue(opts.maildir_create)
+
+
 class TestMaildirUidHandling(unittest.TestCase):
     """Tests for Maildir UID mismatch handling in Docker-like environments."""
 

@@ -581,6 +581,8 @@ def _parse_config(config: ConfigParser, opts):
 
         if "graph_url" in graph_config:
             opts.graph_url = graph_config["graph_url"]
+        elif "url" in graph_config:
+            opts.graph_url = graph_config["url"]
 
         if "allow_unencrypted_storage" in graph_config:
             opts.graph_allow_unencrypted_storage = bool(
@@ -884,10 +886,15 @@ def _parse_config(config: ConfigParser, opts):
 
     if "maildir" in config.sections():
         maildir_api_config = config["maildir"]
-        maildir_p = maildir_api_config.get("maildir_path")
+        maildir_p = maildir_api_config.get(
+            "maildir_path", maildir_api_config.get("path")
+        )
         opts.maildir_path = _expand_path(maildir_p) if maildir_p else maildir_p
         opts.maildir_create = bool(
-            maildir_api_config.getboolean("maildir_create", fallback=False)
+            maildir_api_config.getboolean(
+                "maildir_create",
+                fallback=maildir_api_config.getboolean("create", fallback=False),
+            )
         )
 
     if "log_analytics" in config.sections():

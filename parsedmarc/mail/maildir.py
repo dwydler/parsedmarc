@@ -46,16 +46,27 @@ class MaildirConnection(MailboxConnection):
             for subdir in ("cur", "new", "tmp"):
                 os.makedirs(os.path.join(maildir_path, subdir), exist_ok=True)
         self._client = mailbox.Maildir(maildir_path, create=maildir_create)
+        self._active_folder: mailbox.Maildir = self._client
         self._subfolder_client: Dict[str, mailbox.Maildir] = {}
 
+    def _get_folder(self, folder_name: str) -> mailbox.Maildir:
+        """Return a cached subfolder handle, creating it if needed."""
+        if folder_name not in self._subfolder_client:
+            self._subfolder_client[folder_name] = self._client.add_folder(folder_name)
+        return self._subfolder_client[folder_name]
+
     def create_folder(self, folder_name: str):
-        self._subfolder_client[folder_name] = self._client.add_folder(folder_name)
+        self._get_folder(folder_name)
 
     def fetch_messages(self, reports_folder: str, **kwargs):
-        return self._client.keys()
+        if reports_folder and reports_folder != "INBOX":
+            self._active_folder = self._get_folder(reports_folder)
+        else:
+            self._active_folder = self._client
+        return self._active_folder.keys()
 
     def fetch_message(self, message_id: str) -> str:
-        msg = self._client.get(message_id)
+        msg = self._active_folder.get(message_id)
         if msg is not None:
             msg = msg.as_string()
             if msg is not None:
@@ -63,16 +74,15 @@ class MaildirConnection(MailboxConnection):
         return ""
 
     def delete_message(self, message_id: str):
-        self._client.remove(message_id)
+        self._active_folder.remove(message_id)
 
     def move_message(self, message_id: str, folder_name: str):
-        message_data = self._client.get(message_id)
+        message_data = self._active_folder.get(message_id)
         if message_data is None:
             return
-        if folder_name not in self._subfolder_client:
-            self._subfolder_client[folder_name] = self._client.add_folder(folder_name)
-        self._subfolder_client[folder_name].add(message_data)
-        self._client.remove(message_id)
+        dest = self._get_folder(folder_name)
+        dest.add(message_data)
+        self._active_folder.remove(message_id)
 
     def keepalive(self):
         return
