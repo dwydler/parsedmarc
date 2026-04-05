@@ -21,15 +21,10 @@ ProofPoint Email Fraud Defense, and Valimail.
 > [!NOTE]
 > __Domain-based Message Authentication, Reporting, and Conformance__ (DMARC) is an email authentication protocol.
 
-## Help Wanted
+## Sponsors
 
-This project is maintained by one developer. Please consider reviewing the open
-[issues](https://github.com/domainaware/parsedmarc/issues) to see how you can
-contribute code, documentation, or user support. Assistance on the pinned
-issues would be particularly helpful.
-
-Thanks to all
-[contributors](https://github.com/domainaware/parsedmarc/graphs/contributors)!
+This is a project is maintained by one developer.
+Please consider [sponsoring my work](https://github.com/sponsors/seanthegeek) if you or your organization benefit from it.
 
 ## Features
 
