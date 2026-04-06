@@ -1,5 +1,13 @@
 # Changelog
 
+## 9.6.0
+
+### Changes
+
+- The included DB-IP Country Lite database is now automatically updated at startup (and on SIGHUP in watch mode) by downloading the latest copy from GitHub, unless the `offline` flag is set. Falls back to a previously cached copy or the bundled database on failure. This allows the IP-to-country database to stay current without requiring a new package release.
+- Updated the included DB-IP Country Lite database to the 2026-04 release.
+- Added the `ip_db_url` configuration option (`PARSEDMARC_GENERAL_IP_DB_URL` env var) to override the default download URL for the IP-to-country database.
+
 ## 9.5.5
 
 ### Fixed
