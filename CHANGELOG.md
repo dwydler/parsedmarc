@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.10.1
+
+### Fixed
+
+- Stripped speculative behavior from the IPinfo Lite REST API integration shipped in 9.10.0 after auditing the code against the [Lite API docs](https://ipinfo.io/developers/lite-api). The docs state the Lite API has "no daily or monthly limit and provides unlimited access" and document `?token=` query-parameter auth only; nothing else removed here is documented for Lite. Removed: the 429 rate-limit and 402 quota-exhausted handling, `Retry-After` parsing, cooldown state, and the associated warning/recovery logging; the `https://ipinfo.io/me` account-info probe that expected plan/limit/remaining fields (that endpoint isn't a Lite account endpoint); and the `Authorization: Bearer` header. Auth is now the documented `?token=` query param; the startup probe is a single `/lite/1.1.1.1` lookup that logs `IPinfo API configured` at info level. Retained behavior: 401/403 remains a fatal `InvalidIPinfoAPIKey`, and any other non-2xx or network error falls back to the bundled/cached MMDB per request.
+
 ## 9.10.0
 
 ### Changes
