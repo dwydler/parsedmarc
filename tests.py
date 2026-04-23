@@ -70,10 +70,14 @@ class Test(unittest.TestCase):
         result = parsedmarc.utils.get_base_domain(subdomain)
         assert result == "example.com"
 
-        # Test newer PSL entries
+        # psl_overrides.txt intentionally folds CDN-customer PTRs so every
+        # sender on the same network clusters under one display key.
+        # ``.akamaiedge.net`` is an override, so its subdomains collapse to
+        # ``akamaiedge.net`` even though the live PSL carries the finer-grained
+        # ``c.akamaiedge.net`` — the override is the design decision.
         subdomain = "e3191.c.akamaiedge.net"
         result = parsedmarc.utils.get_base_domain(subdomain)
-        assert result == "c.akamaiedge.net"
+        assert result == "akamaiedge.net"
 
     def testExtractReportXMLComparator(self):
         """Test XML comparator function"""
@@ -269,6 +273,137 @@ class Test(unittest.TestCase):
         self.assertIsNone(info["type"])
         self.assertEqual(info["name"], "Some Unmapped Org, Inc.")
         self.assertEqual(info["asn_domain"], "unmapped-for-this-test.example")
+
+    def testIPinfoAPIPrimarySourceAndInvalidKeyIsFatal(self):
+        """With an API token configured, lookups hit the API first. A 401/403
+        response propagates as ``InvalidIPinfoAPIKey`` so the CLI can exit.
+        A 429 puts the API in a cooldown (falling back to the MMDB) and a
+        successful retry after the cooldown logs recovery."""
+        from unittest.mock import patch, MagicMock
+
+        import parsedmarc.utils as utils_module
+        from parsedmarc.utils import (
+            InvalidIPinfoAPIKey,
+            configure_ipinfo_api,
+            get_ip_address_db_record,
+        )
+
+        def _mock_response(status_code, json_body=None, headers=None):
+            resp = MagicMock()
+            resp.status_code = status_code
+            resp.ok = 200 <= status_code < 300
+            resp.json.return_value = json_body or {}
+            resp.headers = headers or {}
+            return resp
+
+        try:
+            # Success: API returns IPinfo-schema JSON; record comes from API.
+            api_json = {
+                "ip": "8.8.8.8",
+                "asn": "AS15169",
+                "as_name": "Google LLC",
+                "as_domain": "google.com",
+                "country_code": "US",
+            }
+            with patch(
+                "parsedmarc.utils.requests.get",
+                return_value=_mock_response(200, api_json),
+            ):
+                configure_ipinfo_api("fake-token", probe=False)
+                record = get_ip_address_db_record("8.8.8.8")
+            self.assertEqual(record["country"], "US")
+            self.assertEqual(record["asn"], 15169)
+            self.assertEqual(record["asn_domain"], "google.com")
+
+            # Invalid key: 401 raises a fatal exception even on a random lookup.
+            with patch(
+                "parsedmarc.utils.requests.get",
+                return_value=_mock_response(401),
+            ):
+                configure_ipinfo_api("bad-token", probe=False)
+                with self.assertRaises(InvalidIPinfoAPIKey):
+                    get_ip_address_db_record("8.8.8.8")
+
+            # Rate limited: 429 sets a cooldown and falls back to the MMDB.
+            # The first rate-limit event is logged at WARNING; during the
+            # cooldown no further API requests are made.
+            configure_ipinfo_api("rate-limited", probe=False)
+            with patch(
+                "parsedmarc.utils.requests.get",
+                return_value=_mock_response(429, headers={"Retry-After": "120"}),
+            ):
+                with self.assertLogs("parsedmarc.log", level="WARNING") as cm:
+                    record = get_ip_address_db_record("8.8.8.8")
+            # MMDB fallback fills in Google's ASN from the bundled MMDB.
+            self.assertEqual(record["asn"], 15169)
+            self.assertTrue(
+                any("rate limit" in line.lower() for line in cm.output),
+                f"expected a rate-limit warning, got: {cm.output}",
+            )
+            self.assertTrue(utils_module._IPINFO_API_RATE_LIMITED)
+            self.assertGreater(utils_module._IPINFO_API_COOLDOWN_UNTIL, 0.0)
+
+            # During cooldown: no API call; fall straight through to MMDB.
+            poisoned = {"asn": "AS1", "country_code": "ZZ"}
+            with patch(
+                "parsedmarc.utils.requests.get",
+                return_value=_mock_response(200, poisoned),
+            ) as mock_get:
+                record = get_ip_address_db_record("8.8.8.8")
+                mock_get.assert_not_called()
+
+            # Simulate the cooldown expiring, then a successful retry: the
+            # recovery is logged at INFO and API lookups resume.
+            utils_module._IPINFO_API_COOLDOWN_UNTIL = 0.0
+            with patch(
+                "parsedmarc.utils.requests.get",
+                return_value=_mock_response(200, api_json),
+            ):
+                with self.assertLogs("parsedmarc.log", level="INFO") as cm:
+                    record = get_ip_address_db_record("8.8.8.8")
+            self.assertEqual(record["asn_domain"], "google.com")
+            self.assertTrue(
+                any("recovered" in line.lower() for line in cm.output),
+                f"expected a recovery info log, got: {cm.output}",
+            )
+            self.assertFalse(utils_module._IPINFO_API_RATE_LIMITED)
+        finally:
+            configure_ipinfo_api(None)
+
+    def testIPinfoAPIStartupLogsAccountQuota(self):
+        """``configure_ipinfo_api(..., probe=True)`` should hit the /me
+        endpoint and log plan/usage info at INFO level when available."""
+        from unittest.mock import patch, MagicMock
+
+        from parsedmarc.utils import configure_ipinfo_api
+
+        me_body = {
+            "plan": "Lite",
+            "month": 12345,
+            "limit": 50000,
+            "remaining": 37655,
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.ok = True
+        mock_resp.json.return_value = me_body
+        mock_resp.headers = {}
+
+        try:
+            with patch(
+                "parsedmarc.utils.requests.get", return_value=mock_resp
+            ) as mock_get:
+                with self.assertLogs("parsedmarc.log", level="INFO") as cm:
+                    configure_ipinfo_api("good-token", probe=True)
+                # /me is the first (and only) probe request when it succeeds.
+                called_urls = [args[0] for args, _ in mock_get.call_args_list]
+                self.assertIn("https://ipinfo.io/me", called_urls)
+            output = " ".join(cm.output)
+            self.assertIn("Lite", output)
+            self.assertIn("12345/50000", output)
+            self.assertIn("37655", output)
+        finally:
+            configure_ipinfo_api(None)
 
     def testAggregateCsvExposesASNColumns(self):
         """The aggregate CSV output should include source_asn, source_asn_name,
@@ -2783,6 +2918,38 @@ class TestConfigAliases(unittest.TestCase):
         _parse_config(config, opts)
         self.assertEqual(opts.maildir_path, "/original/path")
         self.assertTrue(opts.maildir_create)
+
+    def test_ipinfo_url_option(self):
+        """[general] ipinfo_url lands on opts.ipinfo_url."""
+        from argparse import Namespace
+        from parsedmarc.cli import _parse_config
+
+        config = ConfigParser(interpolation=None)
+        config.add_section("general")
+        config.set("general", "ipinfo_url", "https://mirror.example/mmdb")
+
+        opts = Namespace()
+        _parse_config(config, opts)
+        self.assertEqual(opts.ipinfo_url, "https://mirror.example/mmdb")
+
+    def test_ip_db_url_deprecated_alias(self):
+        """[general] ip_db_url is accepted as an alias for ipinfo_url but
+        emits a deprecation warning."""
+        from argparse import Namespace
+        from parsedmarc.cli import _parse_config
+
+        config = ConfigParser(interpolation=None)
+        config.add_section("general")
+        config.set("general", "ip_db_url", "https://old.example/mmdb")
+
+        opts = Namespace()
+        with self.assertLogs("parsedmarc.log", level="WARNING") as cm:
+            _parse_config(config, opts)
+        self.assertEqual(opts.ipinfo_url, "https://old.example/mmdb")
+        self.assertTrue(
+            any("ip_db_url" in line and "deprecated" in line for line in cm.output),
+            f"expected deprecation warning, got: {cm.output}",
+        )
 
 
 class TestMaildirUidHandling(unittest.TestCase):
