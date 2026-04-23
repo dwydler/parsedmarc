@@ -62,22 +62,42 @@ IP address info cached for 4 hours, seen aggregate report IDs cached for 1 hour 
 
 ## Code Style
 
-- Ruff for formatting and linting (configured in `.vscode/settings.json`)
-- TypedDict for structured data, type hints throughout
-- Python ≥3.10 required
-- Tests are in a single `tests.py` file using unittest; sample reports live in `samples/`
-- File path config values must be wrapped with `_expand_path()` in `cli.py`
-- Maildir UID checks are intentionally relaxed (warn, don't crash) for Docker compatibility
-- Token file writes must create parent directories before opening for write
+- Ruff for formatting and linting (configured in `.vscode/settings.json`). Run `ruff check .` and `ruff format --check .` after every code edit, before committing.
+- TypedDict for structured data, type hints throughout.
+- Python ≥3.10 required.
+- Tests are in a single `tests.py` file using unittest; sample reports live in `samples/`.
+- File path config values must be wrapped with `_expand_path()` in `cli.py`.
+- Maildir UID checks are intentionally relaxed (warn, don't crash) for Docker compatibility.
+- Token file writes must create parent directories before opening for write.
+- Store natively numeric values as numbers, not pre-formatted strings. Example: ASN is stored as `int 15169`, not `"AS15169"`; Elasticsearch / OpenSearch mappings for such fields use `Integer()` so consumers can do range queries and numeric sorts. Display layers format with a prefix at render time.
+
+## Editing tracked data files
+
+Before rewriting a tracked list/data file from freshly-generated content (anything under `parsedmarc/resources/maps/`, CSVs, `.txt` lists), check the existing file first — `git show HEAD:<path> | wc -l`, `git log -1 -- <path>`, `git diff --stat`. Files like `known_unknown_base_reverse_dns.txt` and `base_reverse_dns_map.csv` accumulate manually-curated entries across many sessions, and a "fresh" regeneration that drops the row count is almost certainly destroying prior work. If the new content is meant to *add* rather than *replace*, use a merge/append pattern. Treat any unexpected row-count drop in the pending diff as a red flag.
+
+## Releases
+
+A release isn't done until built artifacts are attached to the GitHub release page. Full sequence:
+
+1. Bump version in `parsedmarc/constants.py`; update `CHANGELOG.md` with a new section under the new version number.
+2. Commit on a feature branch, open a PR, merge to master.
+3. `git fetch && git checkout master && git pull`.
+4. `git tag -a <version> -m "<version>" <sha>` and `git push origin <version>`.
+5. `rm -rf dist && hatch build`. Verify `git describe --tags --exact-match` matches the tag.
+6. `gh release create <version> --title "<version>" --notes-file <notes>`.
+7. `gh release upload <version> dist/parsedmarc-<version>.tar.gz dist/parsedmarc-<version>-py3-none-any.whl`.
+8. Confirm `gh release view <version> --json assets` shows both the sdist and the wheel before considering the release complete.
 
 ## Maintaining the reverse DNS maps
 
-`parsedmarc/resources/maps/base_reverse_dns_map.csv` maps reverse DNS base domains to a display name and service type. See `parsedmarc/resources/maps/README.md` for the field format and the service_type precedence rules.
+`parsedmarc/resources/maps/base_reverse_dns_map.csv` maps a base domain to a display name and service type. The same map is consulted at two points: first with a PTR-derived base domain, and — if the IP has no PTR — with the ASN domain from the bundled IPinfo Lite MMDB (`parsedmarc/resources/ipinfo/ipinfo_lite.mmdb`). See `parsedmarc/resources/maps/README.md` for the field format and the service_type precedence rules.
+
+Because both lookup paths read the same CSV, map keys are a mixed namespace — rDNS-base domains (e.g. `comcast.net`, discovered via `base_reverse_dns.csv`) coexist with ASN domains (e.g. `comcast.com`, discovered via coverage-gap analysis against the MMDB). Entries of both kinds should point to the same `(name, type)` when they describe the same operator — grep before inventing a new display name.
 
 ### File format
 
 - CSV uses **CRLF** line endings and UTF-8 encoding — preserve both when editing programmatically.
-- Entries are sorted alphabetically (case-insensitive) by the first column.
+- Entries are sorted alphabetically (case-insensitive) by the first column. `parsedmarc/resources/maps/sortlists.py` is authoritative — run it after any batch edit to re-sort, dedupe, and validate `type` values.
 - Names containing commas must be quoted.
 - Do not edit in Excel (it mangles Unicode); use LibreOffice Calc or a text editor.
 
@@ -125,7 +145,32 @@ When `unknown_base_reverse_dns.csv` has new entries, follow this order rather th
 - `detect_psl_overrides.py` — scans the lists for clustered IP-containing patterns, auto-adds brand suffixes to `psl_overrides.txt`, folds affected entries to their base, and removes any remaining full-IP entries. Run before the collector on any new batch.
 - `collect_domain_info.py` — the bulk enrichment collector described above. Respects `psl_overrides.txt` and skips full-IP entries.
 - `find_bad_utf8.py` — locates invalid UTF-8 bytes (used after past encoding corruption).
-- `sortlists.py` — sorting helper for the list files.
+- `sortlists.py` — case-insensitive sort + dedupe + `type`-column validator for the list files; the authoritative sorter run after every batch edit.
+
+### Checking ASN-domain coverage of the MMDB
+
+Separately from `base_reverse_dns.csv`, the MMDB itself is a source of keys worth mapping. To find ASN domains with high IP weight that don't yet have a map entry, walk every record in `ipinfo_lite.mmdb`, aggregate IPv4 count per `as_domain`, and subtract what's already a map key:
+
+```python
+import csv, maxminddb
+from collections import defaultdict
+keys = set()
+with open("parsedmarc/resources/maps/base_reverse_dns_map.csv", newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        keys.add(row["base_reverse_dns"].strip().lower())
+v4 = defaultdict(int); names = {}
+for net, rec in maxminddb.open_database("parsedmarc/resources/ipinfo/ipinfo_lite.mmdb"):
+    if net.version != 4 or not isinstance(rec, dict): continue
+    d = rec.get("as_domain")
+    if not d: continue
+    v4[d.lower()] += net.num_addresses
+    names[d.lower()] = rec.get("as_name", "")
+miss = sorted(((d, v4[d], names[d]) for d in v4 if d not in keys), key=lambda x: -x[1])
+for d, c, n in miss[:50]:
+    print(f"{c:>12,}  {d:<30}  {n}")
+```
+
+Apply the same classification rules above (precedence, naming consistency, skip-if-ambiguous, privacy). Many top misses will be brands already in the map under a different rDNS-base key — the goal there is to alias the ASN domain to the same `(name, type)` so both lookup paths hit. For ASN domains with no obvious brand identity (small resellers, parked ASNs), don't map them — the attribution code falls back to the raw `as_name` from the MMDB, which is better than a guess.
 
 ### After a batch merge
 
